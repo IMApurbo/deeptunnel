@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deeptunnel"
+version = "0.1.0"
+description = "DeepSeek → Anthropic API proxy — run DeepSeek behind the Anthropic SDK / Claude Code"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "IMApurbo", email = "bandinvisible8@gmail.com" }]
+keywords = ["deepseek", "anthropic", "claude", "proxy", "llm", "api"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+]
+dependencies = [
+    "flask>=3.0",
+    "requests>=2.31",
+    "wasmtime>=20.0",
+    "numpy>=1.26",
+]
+
+[project.urls]
+Homepage = "https://github.com/IMApurbo/deeptunnel"
+Repository = "https://github.com/IMApurbo/deeptunnel"
+Issues = "https://github.com/IMApurbo/deeptunnel/issues"
+
+[project.scripts]
+deeptunnel = "deeptunnel.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+deeptunnel = ["*.wasm"]

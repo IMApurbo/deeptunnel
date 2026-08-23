@@ -1,0 +1,4 @@
+flask>=3.0
+requests>=2.31
+wasmtime>=20.0
+numpy>=1.26
