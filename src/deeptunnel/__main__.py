@@ -305,6 +305,20 @@ def create_chat_session(http: requests.Session) -> str:
     return data["data"]["biz_data"]["chat_session"]["id"]
 
 
+def delete_all_chat_sessions(http: requests.Session) -> None:
+    """Delete all past DeepSeek chat sessions to reduce hallucination from stale context."""
+    try:
+        resp = http.post(f"{BASE_URL}/api/v0/chat_session/delete_all", json={})
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            print(f"[startup] delete_all_chat_sessions: unexpected response: {data}", flush=True)
+        else:
+            print("[startup] All past DeepSeek chat sessions cleared.", flush=True)
+    except Exception as exc:
+        print(f"[startup] Warning: could not clear past sessions: {exc}", flush=True)
+
+
 def get_pow_challenge(http: requests.Session) -> dict:
     resp = http.post(
         f"{BASE_URL}/api/v0/chat/create_pow_challenge",
@@ -350,6 +364,10 @@ class SessionStore:
 
     def reset(self, key: str, token: str | None = None) -> dict:
         with self._lock:
+            # Clear all past sessions on the (possibly new) account before starting fresh.
+            cookies = parse_cookies(COOKIE_STR) if COOKIE_STR else {}
+            cleanup_http = make_http_session(token or _token_pool.current(), cookies)
+            delete_all_chat_sessions(cleanup_http)
             session = self._new_session_dict(token=token)
             self._sessions[key] = session
             self._sessions.move_to_end(key)
@@ -1440,6 +1458,13 @@ def main():
     print("Loading WASM solver...", end=" ", flush=True)
     hasher = DeepSeekHash(wasm_path)
     print("OK")
+
+    # Clear all past DeepSeek conversations at startup so the AI starts
+    # with a clean slate and does not hallucinate from stale history.
+    print("Clearing past DeepSeek conversations...", end=" ", flush=True)
+    _startup_cookies = parse_cookies(COOKIE_STR) if COOKIE_STR else {}
+    _startup_http = make_http_session(_token_pool.current(), _startup_cookies)
+    delete_all_chat_sessions(_startup_http)
 
     model_label  = "fast (model_type=default)" if _CLI_ARGS.model == "fast" else "expert (model_type=null)"
     search_label = "enabled"  if _CLI_ARGS.search else "disabled"
