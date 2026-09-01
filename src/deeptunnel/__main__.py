@@ -393,67 +393,129 @@ def tools_to_xml(tools: list) -> str:
 TOOL_CALL_SYSTEM = """\
 You are Acurist, an autonomous terminal AI agent with full shell access.
 
-═══════════════════════════════════════════════════════════════════════════════
-CRITICAL TOOL-CALLING RULES — READ CAREFULLY
-═══════════════════════════════════════════════════════════════════════════════
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║           TOOL-CALLING FORMAT — ABSOLUTE REQUIREMENT, ZERO EXCEPTIONS        ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
 
-1. IMMEDIATE EXECUTION — NO ANNOUNCEMENTS:
-   ❌ WRONG: "Let me check the files…" (then nothing)
-   ✅ CORRECT: Output the <tool_use> block immediately, with NO preamble.
+Every single tool call MUST use this EXACT structure — nothing else is valid:
 
-2. EXACT FORMAT — always wrap tool calls like this:
-   <tool_use>
-   {"name": "TOOL_NAME", "id": "call_UNIQUE_ID", "input": {PARAMETERS}}
-   </tool_use>
+  <tool_use>
+  {"name": "TOOL_NAME", "id": "call_UNIQUE_ID", "input": {PARAMETERS}}
+  </tool_use>
 
-3. ONLY USE TOOLS listed in the <tools> section.
-   Available tools: run_shell, read_bg_log, edit_file, read_file, write_file,
-   grep, glob, web_fetch, ask_user, update_todos, notify_user, diff_file,
-   list_dir, copy_to_clipboard.
+The three required top-level keys are: "name", "id", "input".
+ALL parameters go inside the "input" object — never at the top level.
 
-4. WAIT FOR RESULTS — after every <tool_use> block, stop and wait for the
-   <tool_result> before continuing.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅  CORRECT — copy this pattern exactly:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-5. NEVER CLAIM UNVERIFIED WORK — only report what the tool result confirms.
+  <tool_use>
+  {"name": "run_shell", "id": "call_001", "input": {"command": "ls /tmp", "timeout_seconds": 10}}
+  </tool_use>
 
-6. NEVER USE ```bash / ```sh / ```shell fenced code blocks for commands.
-   Use run_shell instead.
+  <tool_use>
+  {"name": "run_shell", "id": "call_002", "input": {"command": "curl -s https://example.com", "timeout_seconds": 15}}
+  </tool_use>
 
-7. SHELL QUOTING — the "command" field is passed verbatim to bash.
-   CORRECT:   curl -s http://user:pass@host/path
-   INCORRECT: curl -s "http://user:pass@host/path"
+  <tool_use>
+  {"name": "read_file", "id": "call_003", "input": {"path": "/etc/passwd"}}
+  </tool_use>
 
-8. SUDO IS BLOCKED — never use sudo, su, pkexec, or doas.
+  <tool_use>
+  {"name": "web_fetch", "id": "call_004", "input": {"url": "https://example.com", "timeout_seconds": 20}}
+  </tool_use>
 
-9. LONG-RUNNING COMMANDS — use timeout_seconds on run_shell for builds,
-   downloads, or test suites that take more than 60 s.
+  <tool_use>
+  {"name": "run_shell", "id": "call_005", "input": {"command": "node server.js", "background": true}}
+  </tool_use>
 
-10. BACKGROUND PROCESSES — use background: true on run_shell only for
-    servers, watchers, or other non-terminating processes. Then tail the
-    output with read_bg_log using the returned job_id.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❌  FORBIDDEN — these formats will BREAK the system and must NEVER appear:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-11. FILE EDITING — prefer edit_file or diff_file over write_file when
-    modifying an existing file. Use diff_file when you want the user to
-    review changes before they are applied.
+  FORBIDDEN #1 — flat JSON with "tool" key (the most common mistake):
+    {"tool": "run_shell", "command": "curl ...", "timeout_seconds": 10}
+    {"tool": "run_shell", "command": "curl ...", "timeout_seconds": 10}
+    {"tool": "run_shell", "command": "curl ...", "timeout_seconds": 10}
+  ↑ This exact pattern is WRONG. "tool" is not a valid key. "command" must NOT
+    be at the top level. The correct key is "name". Params go in "input": {}.
 
-12. MULTI-STEP TASKS — call update_todos at the start with your plan, then
-    update statuses as you go so the user can follow your progress.
+  FORBIDDEN #2 — "tool" key even with "input":
+    {"tool": "run_shell", "input": {"command": "..."}}
+  ↑ Still wrong. Must use "name", not "tool".
 
-13. ABSOLUTE PATHS — never use 'cd'; each run_shell call is a fresh process.
-    Use absolute paths everywhere.
-═══════════════════════════════════════════════════════════════════════════════
+  FORBIDDEN #3 — "name" present but no "input" wrapper:
+    {"name": "run_shell", "command": "...", "timeout_seconds": 10}
+  ↑ Wrong. "command" must be inside "input": {"command": "..."}.
+
+  FORBIDDEN #4 — any other syntax:
+    run_shell(command="...")          ← function-call syntax, invalid
+    ```bash\\ncommand\\n```            ← fenced code block, invalid
+    <bash>command</bash>              ← XML tag, invalid
+    <run_shell>...</run_shell>        ← XML tag, invalid
+
+  REMEMBER: outer key = "name" (NOT "tool"). All params = inside "input": {}.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+AVAILABLE TOOLS AND THEIR input PARAMETERS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  run_shell       → input: {"command": "...", "timeout_seconds": N, "background": true/false}
+  read_bg_log     → input: {"job_id": "...", "tail_lines": N, "kill": true/false}
+  read_file       → input: {"path": "...", "offset": N, "limit": N}
+  write_file      → input: {"path": "...", "content": "..."}
+  edit_file       → input: {"path": "...", "instruction": "..."}
+  diff_file       → input: {"path": "...", "instruction": "..."}
+  grep            → input: {"pattern": "...", "path": "...", "glob": "..."}
+  glob            → input: {"pattern": "...", "path": "..."}
+  list_dir        → input: {"path": "...", "show_hidden": true/false}
+  web_fetch       → input: {"url": "...", "timeout_seconds": N}
+  ask_user        → input: {"question": "...", "options": ["a", "b"]}
+  update_todos    → input: {"todos": [{"text": "...", "status": "pending|in_progress|completed"}]}
+  notify_user     → input: {"message": "..."}
+  copy_to_clipboard → input: {"text": "..."}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPERATIONAL RULES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  • Output <tool_use> immediately — no "let me…" / "I'll…" preamble first.
+  • One tool call per response turn. Wait for <tool_result> before the next.
+  • Never claim work is done before seeing the tool result.
+  • SUDO IS BLOCKED — never use sudo, su, pkexec, or doas.
+  • Never use 'cd' — each run_shell is a fresh shell. Use absolute paths.
+  • For multi-step tasks, call update_todos first with your full plan.
+  • Use background: true only for non-terminating processes (servers, watchers).
+  • Use timeout_seconds inside input for slow commands (builds, downloads).
 """
 
 TOOL_CALL_REMINDER = (
     "<system-reminder>\n"
-    "If your next step requires a tool, output the <tool_use> block immediately.\n"
-    "No 'let me…' / 'I'll…' announcement first — just the block.\n"
-    "NEVER output a ```bash, ```sh, ```shell, or ```zsh fenced code block.\n"
-    "The JSON \"name\" field must be an exact acurist tool name such as\n"
-    "\"run_shell\", \"read_file\", \"edit_file\", \"write_file\", \"grep\", \"glob\",\n"
-    "\"web_fetch\", \"ask_user\", \"update_todos\", \"notify_user\", \"diff_file\",\n"
-    "\"list_dir\", \"copy_to_clipboard\", \"read_bg_log\".\n"
-    "Never use Claude Code tool names (Bash, Read, Write, Edit, etc.).\n"
+    "⚠ MANDATORY TOOL FORMAT — output ONLY this structure, nothing else:\n"
+    "\n"
+    "  <tool_use>\n"
+    "  {\"name\": \"TOOL_NAME\", \"id\": \"call_XYZ\", \"input\": {PARAMETERS}}\n"
+    "  </tool_use>\n"
+    "\n"
+    "CORRECT run_shell example:\n"
+    "  <tool_use>\n"
+    "  {\"name\": \"run_shell\", \"id\": \"call_1\", \"input\": {\"command\": \"ls /tmp\", \"timeout_seconds\": 10}}\n"
+    "  </tool_use>\n"
+    "\n"
+    "❌ FORBIDDEN — do NOT produce this format under any circumstances:\n"
+    "  {\"tool\": \"run_shell\", \"command\": \"...\", \"timeout_seconds\": 10}\n"
+    "  ↑ Wrong key (\"tool\" not \"name\"), params must be inside \"input\": {}, not top-level.\n"
+    "\n"
+    "Rules:\n"
+    "  • Top-level key = \"name\" (NEVER \"tool\")\n"
+    "  • ALL parameters go inside \"input\": {} (NEVER at top level)\n"
+    "  • Wrap everything in <tool_use>...</tool_use>\n"
+    "  • Valid tools: run_shell, read_bg_log, read_file, write_file, edit_file,\n"
+    "    diff_file, grep, glob, list_dir, web_fetch, ask_user, update_todos,\n"
+    "    notify_user, copy_to_clipboard\n"
+    "\n"
+    "Output the <tool_use> block now. No preamble.\n"
     "</system-reminder>"
 )
 
@@ -616,6 +678,46 @@ def _close_unbalanced_json(s: str):
     return s + "".join(reversed(stack))
 
 
+def _normalize_tool_obj(obj: dict) -> dict | None:
+    """
+    Convert wrong-format tool dicts the model sometimes emits into the
+    canonical {"name": ..., "id": ..., "input": {...}} shape.
+
+    Handles these observed wrong patterns:
+      {"tool": "run_shell", "command": "...", "timeout_seconds": 10}
+      {"tool": "run_shell", "input": {"command": "..."}}
+      {"name": "run_shell", "command": "..."}   ← name correct but no input wrapper
+    """
+    if not isinstance(obj, dict):
+        return None
+
+    # Already correct
+    if "name" in obj and "input" in obj and isinstance(obj["input"], dict):
+        return obj
+
+    # Determine tool name — accept either "name" or "tool" key
+    tool_name = obj.get("name") or obj.get("tool")
+    if not tool_name or tool_name not in ACURIST_TOOL_NAMES:
+        return None
+
+    # If there's already an "input" dict, use it
+    if "input" in obj and isinstance(obj["input"], dict):
+        return {
+            "name":  tool_name,
+            "id":    obj.get("id", f"toolu_{uuid.uuid4().hex[:16]}"),
+            "input": obj["input"],
+        }
+
+    # Otherwise promote all non-meta keys to input
+    skip = {"name", "tool", "id", "type"}
+    input_params = {k: v for k, v in obj.items() if k not in skip}
+    return {
+        "name":  tool_name,
+        "id":    obj.get("id", f"toolu_{uuid.uuid4().hex[:16]}"),
+        "input": input_params,
+    }
+
+
 def _parse_json_tool(raw: str):
     cleaned = _strip_json_fences(raw)
     cleaned = _fix_invalid_json_escapes(cleaned)
@@ -626,14 +728,20 @@ def _parse_json_tool(raw: str):
         re.sub(r",\s*([}\]])", r"\1", cleaned),
     ]:
         try:
-            return json.loads(attempt)
+            obj = json.loads(attempt)
+            if isinstance(obj, dict):
+                return _normalize_tool_obj(obj) or obj
+            return obj
         except json.JSONDecodeError:
             pass
 
     closed = _close_unbalanced_json(re.sub(r",\s*([}\]])", r"\1", cleaned))
     if closed:
         try:
-            return json.loads(closed)
+            obj = json.loads(closed)
+            if isinstance(obj, dict):
+                return _normalize_tool_obj(obj) or obj
+            return obj
         except json.JSONDecodeError:
             pass
 
@@ -670,10 +778,57 @@ def _find_first_tool_call_end(text: str) -> int:
     return idx + len("</tool_use>") if idx != -1 else -1
 
 
+def _rewrap_bare_wrong_format(text: str) -> str:
+    """
+    Find JSON objects in the text that look like wrong-format tool calls
+    (using "tool" key instead of "name", or "name" without "input" wrapper)
+    and rewrap them as proper <tool_use> blocks.
+
+    Catches patterns like:
+      {
+        "tool": "run_shell",
+        "command": "curl ...",
+        "timeout_seconds": 10
+      }
+    """
+    # Match top-level {...} JSON blobs not already inside <tool_use>
+    json_blob_pat = re.compile(r"(?<!</tool_use>\s)(\{[^{}]*(?:\{[^{}]*\}[^{}]*)?\})", re.DOTALL)
+
+    def try_rewrap(m: re.Match) -> str:
+        raw = m.group(1)
+        try:
+            obj = json.loads(_fix_invalid_json_escapes(_escape_raw_control_chars(raw.strip())))
+        except json.JSONDecodeError:
+            return raw  # leave as-is
+
+        if not isinstance(obj, dict):
+            return raw
+
+        # Only intercept if it looks like a wrong-format tool call
+        has_tool_key  = "tool"  in obj and obj["tool"]  in ACURIST_TOOL_NAMES
+        has_name_key  = "name"  in obj and obj["name"]  in ACURIST_TOOL_NAMES
+        missing_input = "input" not in obj or not isinstance(obj.get("input"), dict)
+
+        if not (has_tool_key or (has_name_key and missing_input)):
+            return raw  # already correct or not a tool call
+
+        normalized = _normalize_tool_obj(obj)
+        if normalized is None:
+            return raw
+
+        print(f"[rewrap] fixed wrong-format tool call → {normalized['name']}", flush=True)
+        return f"<tool_use>\n{json.dumps(normalized, indent=2)}\n</tool_use>"
+
+    return json_blob_pat.sub(try_rewrap, text)
+
+
 def parse_response(text: str, valid_tools=None) -> list:
     blocks: list[dict] = []
     last = 0
     last_tool_end = None
+
+    # Pre-pass 0: fix bare wrong-format JSON blobs before other parsing
+    text = _rewrap_bare_wrong_format(text)
 
     # Pre-pass: DeepSeek-V3 special tokens → <tool_use>
     special_token_pat = re.compile(
@@ -753,6 +908,8 @@ def parse_response(text: str, valid_tools=None) -> list:
 # ── ToolFilter ────────────────────────────────────────────────────────────────
 
 _TOOL_USE_PREFILL = '<tool_use>\n{"name": "'
+# Note: this prefill forces the model to open with the correct key ("name"),
+# making it structurally impossible to emit {"tool": ...} on a retry.
 
 
 class ToolFilter:
@@ -764,15 +921,33 @@ class ToolFilter:
                 self._valid_tools.add(name)
 
     def call_with_filter(self, session_key: str, prompt: str) -> tuple[str, list]:
-        MAX_UNKNOWN_TOOL_RETRIES = 2
-        unknown_tool_attempts = 0
+        MAX_RETRIES = 2
+        attempts = 0
         current_prompt = prompt
+
+        # Detect wrong-format tool calls not caught by the parser:
+        #   Pattern A: {"tool": "run_shell", ...}  — wrong key
+        #   Pattern B: {"name": "run_shell", "command": ..., "timeout_seconds": ...}
+        #              — correct key but params at top level instead of inside "input"
+        _tool_names_re = '|'.join(re.escape(n) for n in ACURIST_TOOL_NAMES)
+        _wrong_fmt_pat = re.compile(
+            r'(?:'
+            # Pattern A: "tool" key used instead of "name"
+            r'\{\s*"tool"\s*:\s*"(?:' + _tool_names_re + r')"'
+            r'|'
+            # Pattern B: correct "name" key but "command"/"timeout_seconds"/"background"
+            # appear at top level (not wrapped in "input": {})
+            r'\{\s*"name"\s*:\s*"(?:' + _tool_names_re + r')"'
+            r'(?=[^}]*"(?:command|timeout_seconds|background|path|url|pattern|job_id|content|instruction|question|message|text|todos|glob|show_hidden|offset|limit|tail_lines|kill)"\s*:(?![^}]*"input"\s*:))'
+            r')',
+            re.DOTALL,
+        )
 
         while True:
             raw_text, _ = call_deepseek_managed(session_key, current_prompt)
             blocks = parse_response(raw_text, valid_tools=self._valid_tools or None)
 
-            # Check for tool names the model hallucinated that aren't in our schema
+            # 1. Unknown tool names
             unknown: set[str] = set()
             for b in blocks:
                 if b["type"] == "tool_use":
@@ -780,21 +955,57 @@ class ToolFilter:
                     if self._valid_tools and name not in self._valid_tools:
                         unknown.add(name)
 
-            if unknown:
-                if unknown_tool_attempts >= MAX_UNKNOWN_TOOL_RETRIES:
-                    return raw_text, blocks
-                unknown_tool_attempts += 1
-                valid_list = ", ".join(sorted(self._valid_tools))
+            # 2. Wrong format still present in raw text after parser pass
+            wrong_format = bool(_wrong_fmt_pat.search(raw_text))
+
+            if not unknown and not wrong_format:
+                return raw_text, blocks
+
+            if attempts >= MAX_RETRIES:
+                return raw_text, blocks
+
+            attempts += 1
+            valid_list = ", ".join(sorted(self._valid_tools)) if self._valid_tools else "see <tools>"
+
+            if wrong_format and not unknown:
                 correction = (
                     f"\n\nHuman: <tool_use_error>\n"
-                    f"ERROR: You tried to call unknown tool(s): {', '.join(sorted(unknown))}.\n"
-                    f"Only use acurist tools from this list: {valid_list}\n"
+                    f"WRONG FORMAT DETECTED. Your response contained an invalid tool call structure.\n"
+                    f"\n"
+                    f"❌ You produced something like:\n"
+                    f"  {{\"tool\": \"run_shell\", \"command\": \"...\", \"timeout_seconds\": 10}}\n"
+                    f"  or: {{\"name\": \"run_shell\", \"command\": \"...\", \"timeout_seconds\": 10}}\n"
+                    f"Both are INVALID. \"tool\" is not a key. Parameters must NOT be at the top level.\n"
+                    f"\n"
+                    f"✅ The ONLY valid format is:\n"
+                    f"  <tool_use>\n"
+                    f"  {{\"name\": \"TOOL_NAME\", \"id\": \"call_1\", \"input\": {{PARAMETERS}}}}\n"
+                    f"  </tool_use>\n"
+                    f"\n"
+                    f"Correct run_shell example:\n"
+                    f"  <tool_use>\n"
+                    f"  {{\"name\": \"run_shell\", \"id\": \"call_1\", \"input\": {{\"command\": \"ls /tmp\", \"timeout_seconds\": 10}}}}\n"
+                    f"  </tool_use>\n"
+                    f"\n"
+                    f"Retry now using the correct format. Output only the <tool_use> block.\n"
                     f"</tool_use_error>\n\nAssistant: {_TOOL_USE_PREFILL}"
                 )
-                current_prompt = current_prompt + correction
-                continue
+            else:
+                correction = (
+                    f"\n\nHuman: <tool_use_error>\n"
+                    f"ERROR: Invalid tool call.\n"
+                    + (f"Unknown tool(s): {', '.join(sorted(unknown))}. Valid: {valid_list}\n" if unknown else "")
+                    + (
+                        f"Wrong format: used \"tool\" key or params at top level instead of inside \"input\": {{}}.\n"
+                        f"❌ Bad:  {{\"tool\": \"run_shell\", \"command\": \"...\", \"timeout_seconds\": 10}}\n"
+                        f"✅ Good: <tool_use>\\n{{\"name\": \"run_shell\", \"id\": \"call_1\", \"input\": {{\"command\": \"...\", \"timeout_seconds\": 10}}}}\\n</tool_use>\n"
+                        if wrong_format else ""
+                    )
+                    + f"Output the corrected <tool_use> block now.\n"
+                    f"</tool_use_error>\n\nAssistant: {_TOOL_USE_PREFILL}"
+                )
 
-            return raw_text, blocks
+            current_prompt = current_prompt + correction
 
 # ── SSE ───────────────────────────────────────────────────────────────────────
 
