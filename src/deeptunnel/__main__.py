@@ -1,5 +1,5 @@
 """
-deeptunnel — DeepSeek → Anthropic API Proxy
+deeptunnel — DeepSeek → Anthropic API Proxy (acurist edition)
 
 Run with:
     deeptunnel [--model fast|expert] [--search|--no-search] [--think] [--port PORT]
@@ -38,32 +38,18 @@ CACHE_DIR     = Path.home() / ".cache" / "deeptunnel"
 
 
 def get_wasm_path() -> Path:
-    """
-    Return the path to the WASM file, downloading it on first use.
-
-    Search order:
-      1. Same directory as this file (manual placement / dev mode).
-      2. ~/.cache/deeptunnel/sha3_wasm_bg.wasm  (cached download).
-      3. Download from GitHub, store in the cache dir.
-    """
-    # 1. Next to this file (dev / manual placement)
     local = Path(__file__).parent / WASM_FILENAME
     if local.exists():
         return local
-
-    # 2. Cached copy
     cached = CACHE_DIR / WASM_FILENAME
     if cached.exists():
         return cached
-
-    # 3. Download
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     print(f"Downloading WASM solver → {cached}", flush=True)
     print(f"  Source: {WASM_URL}", flush=True)
     try:
         with urllib.request.urlopen(WASM_URL, timeout=30) as resp:
             data = resp.read()
-        # Sanity-check: WASM magic bytes are 0x00 0x61 0x73 0x6D
         if data[:4] != b"\x00asm":
             raise RuntimeError(
                 f"Downloaded file does not look like a WASM binary "
@@ -88,7 +74,7 @@ def get_wasm_path() -> Path:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="deeptunnel",
-        description="DeepSeek → Anthropic API Proxy (deeptunnel)",
+        description="DeepSeek → Anthropic API Proxy — acurist edition",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Model / feature flags (all optional; defaults shown):
@@ -110,42 +96,14 @@ Environment variables:
 After starting:
   export ANTHROPIC_BASE_URL="http://localhost:8765"
   export ANTHROPIC_API_KEY="local-proxy-key"
-  claude
+  # Then launch acurist
         """,
     )
-    parser.add_argument(
-        "--model",
-        choices=["fast", "expert"],
-        default="fast",
-        help='Model tier: "fast" → model_type="default", "expert" → model_type=null (default: fast)',
-    )
-    parser.add_argument(
-        "--search",
-        dest="search",
-        action="store_true",
-        default=True,
-        help="Enable web search (default: on)",
-    )
-    parser.add_argument(
-        "--no-search",
-        dest="search",
-        action="store_false",
-        help="Disable web search",
-    )
-    parser.add_argument(
-        "--think",
-        dest="think",
-        action="store_true",
-        default=False,
-        help="Enable thinking mode (default: off)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="Port to listen on (default: PROXY_PORT env var or 8765)",
-    )
-    # Allow Flask's reloader to pass extra args without crashing
+    parser.add_argument("--model", choices=["fast", "expert"], default="fast")
+    parser.add_argument("--search", dest="search", action="store_true", default=True)
+    parser.add_argument("--no-search", dest="search", action="store_false")
+    parser.add_argument("--think", dest="think", action="store_true", default=False)
+    parser.add_argument("--port", type=int, default=None)
     args, _ = parser.parse_known_args()
     return args
 
@@ -158,14 +116,12 @@ _port_from_env = int(os.environ.get("PROXY_PORT", 8765))
 PORT       = _CLI_ARGS.port if _CLI_ARGS.port is not None else _port_from_env
 COOKIE_STR = os.environ.get("DEEPSEEK_COOKIES", "")
 
-MAX_CACHED_SESSIONS   = int(os.environ.get("PROXY_MAX_SESSIONS", 64))
-MAX_HISTORY_MESSAGES  = int(os.environ.get("PROXY_MAX_HISTORY_MESSAGES", 40))
+MAX_CACHED_SESSIONS  = int(os.environ.get("PROXY_MAX_SESSIONS", 64))
+MAX_HISTORY_MESSAGES = int(os.environ.get("PROXY_MAX_HISTORY_MESSAGES", 40))
 
 # ── Multi-token pool ──────────────────────────────────────────────────────────
 
 class TokenPool:
-    """Round-robin pool of DeepSeek bearer tokens with busy-rotation support."""
-
     def __init__(self, token_env: str):
         raw = token_env or ""
         self._tokens = [t.strip() for t in raw.split(",") if t.strip()]
@@ -202,7 +158,7 @@ def TOKEN():
     return _token_pool.current()
 
 
-BASE_URL  = "https://chat.deepseek.com"
+BASE_URL = "https://chat.deepseek.com"
 
 CLIENT_HEADERS = {
     "User-Agent":               "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
@@ -306,7 +262,6 @@ def create_chat_session(http: requests.Session) -> str:
 
 
 def delete_all_chat_sessions(http: requests.Session) -> None:
-    """Delete all past DeepSeek chat sessions to reduce hallucination from stale context."""
     try:
         resp = http.post(f"{BASE_URL}/api/v0/chat_session/delete_all", json={})
         resp.raise_for_status()
@@ -364,7 +319,6 @@ class SessionStore:
 
     def reset(self, key: str, token: str | None = None) -> dict:
         with self._lock:
-            # Clear all past sessions on the (possibly new) account before starting fresh.
             cookies = parse_cookies(COOKIE_STR) if COOKIE_STR else {}
             cleanup_http = make_http_session(token or _token_pool.current(), cookies)
             delete_all_chat_sessions(cleanup_http)
@@ -391,6 +345,14 @@ def derive_session_key(system: str, msgs: list) -> str:
     return hashlib.sha256(basis.encode("utf-8", "ignore")).hexdigest()[:16]
 
 # ── Tool schema → prompt helpers ──────────────────────────────────────────────
+# Acurist-specific: tool names use snake_case JSON format, not Claude Code XML tags.
+
+# All tool names acurist can emit (kept as a set for fast lookup)
+ACURIST_TOOL_NAMES = {
+    "run_shell", "read_bg_log", "edit_file", "read_file", "write_file",
+    "grep", "glob", "web_fetch", "ask_user", "update_todos",
+    "notify_user", "diff_file", "list_dir", "copy_to_clipboard",
+}
 
 def tools_to_xml(tools: list) -> str:
     if not tools:
@@ -418,39 +380,80 @@ def tools_to_xml(tools: list) -> str:
     return "\n".join(lines)
 
 
+# ── Acurist-specific prompt injection ─────────────────────────────────────────
+#
+# This replaces deeptunnel's generic Claude Code TOOL_CALL_SYSTEM with one
+# tailored to acurist's snake_case JSON tool schema.  The key differences:
+#   • Tool names are snake_case (run_shell, read_file, etc.) not PascalCase
+#   • Tool calls must use the <tool_use> JSON block format only — no native XML tags
+#   • background / timeout_seconds params are called out explicitly
+#   • sudo is always blocked
+#   • The reminder is injected before every "Assistant:" turn
+
 TOOL_CALL_SYSTEM = """\
-You are Claude, an AI assistant that can use tools.
+You are Acurist, an autonomous terminal AI agent with full shell access.
 
 ═══════════════════════════════════════════════════════════════════════════════
-CRITICAL TOOL-CALLING RULES (READ CAREFULLY):
+CRITICAL TOOL-CALLING RULES — READ CAREFULLY
 ═══════════════════════════════════════════════════════════════════════════════
 
-1. IMMEDIATE EXECUTION - NO ANNOUNCEMENTS:
-   ❌ WRONG: "Now let's check the files" (then nothing)
-   ✅ CORRECT: Immediately output the tool_use block with NO preamble
+1. IMMEDIATE EXECUTION — NO ANNOUNCEMENTS:
+   ❌ WRONG: "Let me check the files…" (then nothing)
+   ✅ CORRECT: Output the <tool_use> block immediately, with NO preamble.
 
-2. EXACT FORMAT REQUIRED:
+2. EXACT FORMAT — always wrap tool calls like this:
    <tool_use>
    {"name": "TOOL_NAME", "id": "call_UNIQUE_ID", "input": {PARAMETERS}}
    </tool_use>
 
-3. ONLY USE LISTED TOOLS listed in the <tools> section.
+3. ONLY USE TOOLS listed in the <tools> section.
+   Available tools: run_shell, read_bg_log, edit_file, read_file, write_file,
+   grep, glob, web_fetch, ask_user, update_todos, notify_user, diff_file,
+   list_dir, copy_to_clipboard.
 
-4. WAIT FOR RESULTS after calling a tool.
+4. WAIT FOR RESULTS — after every <tool_use> block, stop and wait for the
+   <tool_result> before continuing.
 
-5. NEVER CLAIM UNVERIFIED WORK.
+5. NEVER CLAIM UNVERIFIED WORK — only report what the tool result confirms.
 
-6. NEVER USE ```bash / ```sh / ```shell / ```zsh FENCES.
+6. NEVER USE ```bash / ```sh / ```shell fenced code blocks for commands.
+   Use run_shell instead.
+
+7. SHELL QUOTING — the "command" field is passed verbatim to bash.
+   CORRECT:   curl -s http://user:pass@host/path
+   INCORRECT: curl -s "http://user:pass@host/path"
+
+8. SUDO IS BLOCKED — never use sudo, su, pkexec, or doas.
+
+9. LONG-RUNNING COMMANDS — use timeout_seconds on run_shell for builds,
+   downloads, or test suites that take more than 60 s.
+
+10. BACKGROUND PROCESSES — use background: true on run_shell only for
+    servers, watchers, or other non-terminating processes. Then tail the
+    output with read_bg_log using the returned job_id.
+
+11. FILE EDITING — prefer edit_file or diff_file over write_file when
+    modifying an existing file. Use diff_file when you want the user to
+    review changes before they are applied.
+
+12. MULTI-STEP TASKS — call update_todos at the start with your plan, then
+    update statuses as you go so the user can follow your progress.
+
+13. ABSOLUTE PATHS — never use 'cd'; each run_shell call is a fresh process.
+    Use absolute paths everywhere.
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
 TOOL_CALL_REMINDER = (
     "<system-reminder>\n"
     "If your next step requires a tool, output the <tool_use> block immediately.\n"
-    "No \"let me...\" / \"I'll...\" announcement first, nothing after it — just the block.\n"
+    "No 'let me…' / 'I'll…' announcement first — just the block.\n"
     "NEVER output a ```bash, ```sh, ```shell, or ```zsh fenced code block.\n"
-    "The JSON \"name\" field must be an exact tool name from <tools> (e.g. \"Bash\") —\n"
-    "never the literal text \"<tool_call>\" or \"<tool_use>\".\n"
+    "The JSON \"name\" field must be an exact acurist tool name such as\n"
+    "\"run_shell\", \"read_file\", \"edit_file\", \"write_file\", \"grep\", \"glob\",\n"
+    "\"web_fetch\", \"ask_user\", \"update_todos\", \"notify_user\", \"diff_file\",\n"
+    "\"list_dir\", \"copy_to_clipboard\", \"read_bg_log\".\n"
+    "Never use Claude Code tool names (Bash, Read, Write, Edit, etc.).\n"
     "</system-reminder>"
 )
 
@@ -473,6 +476,7 @@ def build_prompt(system: str, messages: list, tools: list) -> str:
     messages = _bound_messages(messages)
     parts = []
 
+    # Inject acurist tool-calling rules first, then the caller's system prompt
     combined_system = TOOL_CALL_SYSTEM
     if system:
         combined_system += "\n\n" + system
@@ -529,35 +533,8 @@ def build_prompt(system: str, messages: list, tools: list) -> str:
     return "\n\n".join(parts)
 
 # ── Response parser ───────────────────────────────────────────────────────────
-
-DEEPSEEK_TAG_TO_TOOL = {
-    "bash": "Bash", "read": "Read", "write": "Write", "edit": "Edit",
-    "multiedit": "MultiEdit", "read_file": "Read", "write_file": "Write",
-    "python": "Bash", "editor": "Edit", "str_replace_based_edit_tool": "Edit",
-    "grep": "Grep", "glob": "Glob", "bashoutput": "BashOutput",
-    "killbash": "KillBash", "todowrite": "TodoWrite", "slashcommand": "SlashCommand",
-    "webfetch": "WebFetch", "websearch": "WebSearch", "agent": "Agent",
-    "taskcreate": "TaskCreate", "taskupdate": "TaskUpdate", "tasklist": "TaskList",
-    "taskget": "TaskGet", "croncreate": "CronCreate", "cronlist": "CronList",
-    "crondelete": "CronDelete", "monitor": "Monitor", "schedulewakeup": "ScheduleWakeup",
-    "pushnotification": "PushNotification", "notebookedit": "NotebookEdit",
-    "notebookread": "NotebookRead", "skill": "Skill", "workflow": "Workflow",
-    "enterplanmode": "EnterPlanMode", "exitplanmode": "ExitPlanMode",
-    "enterworktree": "EnterWorktree", "exitworktree": "ExitWorktree",
-    "askuserquestion": "AskUserQuestion", "computer": "computer",
-}
-
-CLAUDE_CODE_TOOL_NAMES = set(DEEPSEEK_TAG_TO_TOOL.values()) | {
-    "Bash", "Read", "Write", "Edit", "MultiEdit",
-    "WebFetch", "WebSearch", "Agent",
-    "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
-    "CronCreate", "CronList", "CronDelete",
-    "Monitor", "ScheduleWakeup", "PushNotification",
-    "NotebookEdit", "NotebookRead",
-    "Skill", "Workflow", "EnterPlanMode", "ExitPlanMode",
-    "EnterWorktree", "ExitWorktree", "AskUserQuestion", "computer",
-    "str_replace_based_edit_tool",
-}
+# Acurist only uses <tool_use> JSON blocks — no native XML tool tags needed.
+# We keep a minimal set of skip tags and drop the Claude Code tag map entirely.
 
 _SKIP_TAGS = {
     "system", "tools", "tool", "tool_result", "tool_use",
@@ -566,16 +543,13 @@ _SKIP_TAGS = {
     "p", "br", "div", "span", "code", "pre", "ul", "ol", "li",
     "h1", "h2", "h3", "h4", "strong", "em", "b", "i",
     "a", "img", "table", "tr", "td", "th", "thead", "tbody",
-    "form", "input", "button", "select", "option", "textarea",
     "html", "head", "body", "meta", "link", "style", "title",
-    "script", "svg", "iframe", "object", "embed", "frame",
-    "frameset", "applet", "base", "noscript", "template",
-    "math", "marquee", "details", "summary", "video", "audio",
+    "script", "svg", "iframe", "object", "embed",
+    "math", "details", "summary", "video", "audio",
     "response", "result", "output", "answer",
 }
 
-_HIGH_RISK_NATIVE_TOOLS = {"Write", "Edit", "MultiEdit", "Bash"}
-_LEADING_PROSE_WARN_CHARS = 15
+_VALID_JSON_ESC_CHARS = frozenset({'"', '\\', '/', 'b', 'f', 'n', 'r', 't'})
 
 
 def _strip_json_fences(raw: str) -> str:
@@ -586,9 +560,6 @@ def _strip_json_fences(raw: str) -> str:
     return raw
 
 
-_VALID_JSON_ESC_CHARS = frozenset({'"', '\\', '/', 'b', 'f', 'n', 'r', 't'})
-
-
 def _fix_invalid_json_escapes(s: str) -> str:
     out: list[str] = []
     i = 0
@@ -596,18 +567,14 @@ def _fix_invalid_json_escapes(s: str) -> str:
     while i < n:
         ch = s[i]
         if ch != '\\' or i + 1 >= n:
-            out.append(ch)
-            i += 1
-            continue
+            out.append(ch); i += 1; continue
         nxt = s[i + 1]
         if nxt in _VALID_JSON_ESC_CHARS:
             out.append(ch); out.append(nxt); i += 2
-        elif nxt == 'u' and i + 5 <= n and all(
-                c in '0123456789abcdefABCDEF' for c in s[i + 2: i + 6]):
-            out.append(s[i: i + 6]); i += 6
-        elif nxt == 'x' and i + 3 < n and all(
-                c in '0123456789abcdefABCDEF' for c in s[i + 2: i + 4]):
-            out.append(f'\\u00{s[i + 2: i + 4]}'); i += 4
+        elif nxt == 'u' and i + 5 <= n and all(c in '0123456789abcdefABCDEF' for c in s[i+2:i+6]):
+            out.append(s[i:i+6]); i += 6
+        elif nxt == 'x' and i + 3 < n and all(c in '0123456789abcdefABCDEF' for c in s[i+2:i+4]):
+            out.append(f'\\u00{s[i+2:i+4]}'); i += 4
         else:
             out.append('\\\\'); i += 1
     return ''.join(out)
@@ -623,14 +590,10 @@ def _escape_raw_control_chars(s: str) -> str:
             continue
         out.append(ch)
         if in_string:
-            if escape:
-                escape = False
-            elif ch == '\\':
-                escape = True
-            elif ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
+            if escape: escape = False
+            elif ch == '\\': escape = True
+            elif ch == '"': in_string = False
+        elif ch == '"': in_string = True
     return ''.join(out)
 
 
@@ -655,124 +618,27 @@ def _close_unbalanced_json(s: str):
 
 def _parse_json_tool(raw: str):
     cleaned = _strip_json_fences(raw)
-    _original_cleaned = cleaned
-    _escape_fixed = _fix_invalid_json_escapes(cleaned)
-    if _escape_fixed != cleaned:
-        cleaned = _escape_fixed
-    _control_fixed = _escape_raw_control_chars(cleaned)
-    if _control_fixed != cleaned:
-        cleaned = _control_fixed
+    cleaned = _fix_invalid_json_escapes(cleaned)
+    cleaned = _escape_raw_control_chars(cleaned)
 
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-
-    m_dup = re.match(r'^\{\s*"name"\s*:\s*"<tool_use>\s*', cleaned)
-    if m_dup:
-        obj = _parse_json_tool(cleaned[m_dup.end():])
-        if obj is not None:
-            return obj
-
-    m_lit = re.match(r'^<tool_use>\s*', cleaned)
-    if m_lit:
-        obj = _parse_json_tool(cleaned[m_lit.end():])
-        if obj is not None:
-            return obj
-
-    try:
-        fixed = re.sub(r",\s*([}\]])", r"\1", cleaned)
-        return json.loads(fixed)
-    except json.JSONDecodeError:
-        pass
-
-    try:
-        fixed = re.sub(r",\s*([}\]])", r"\1", cleaned)
-        closed = _close_unbalanced_json(fixed)
-        if closed is not None:
-            return json.loads(closed)
-    except json.JSONDecodeError:
-        pass
-
-    try:
-        if '"name"' in cleaned and '"input"' in cleaned and not cleaned.strip().startswith("{"):
-            fixed = "{" + cleaned + "}"
-            fixed = re.sub(r",\s*([}\]])", r"\1", fixed)
-            return json.loads(fixed)
-    except json.JSONDecodeError:
-        pass
-
-    print(f"[tool_parse] failed to parse JSON: {repr(_original_cleaned[:120])}", flush=True)
-    return None
-
-
-_SINGLE_PARAM_TOOLS = {"Bash", "Read", "NotebookRead", "WebFetch", "WebSearch"}
-
-
-def _default_param_key(tool_name: str) -> str:
-    return {"Bash": "command", "Read": "file_path", "NotebookRead": "file_path",
-            "WebFetch": "url", "WebSearch": "query"}.get(tool_name, "input")
-
-
-def parse_native_tag(tag_name: str, inner: str, valid_tools=None):
-    if tag_name in CLAUDE_CODE_TOOL_NAMES:
-        tool_name = tag_name
-    else:
-        tool_name = DEEPSEEK_TAG_TO_TOOL.get(tag_name.lower())
-        if tool_name is None:
-            if valid_tools and tag_name not in valid_tools:
-                return None
-            tool_name = tag_name
-
-    if valid_tools and tool_name not in valid_tools:
-        return None
-
-    params: dict[str, str] = {}
-    inner_clean = re.sub(r"<!\[CDATA\[(.*?)]]>", r"\1", inner, flags=re.DOTALL)
-
-    for m in re.finditer(r"<(\w+)(?:\s[^>]*)?>(.+?)</\1>", inner_clean, re.DOTALL):
-        key = m.group(1)
-        val = re.sub(r"<!\[CDATA\[(.*?)]]>", r"\1", m.group(2).strip(), flags=re.DOTALL)
-        params[key] = val
-
-    if not params and inner_clean.strip().startswith("{"):
+    for attempt in [
+        cleaned,
+        re.sub(r",\s*([}\]])", r"\1", cleaned),
+    ]:
         try:
-            obj = json.loads(inner_clean.strip())
-            if isinstance(obj, dict):
-                params = {k: (json.dumps(v) if not isinstance(v, str) else v) for k, v in obj.items()}
+            return json.loads(attempt)
         except json.JSONDecodeError:
             pass
 
-    if not params:
-        if tool_name in _SINGLE_PARAM_TOOLS:
-            params[_default_param_key(tool_name)] = inner_clean.strip()
-        else:
-            return None
+    closed = _close_unbalanced_json(re.sub(r",\s*([}\]])", r"\1", cleaned))
+    if closed:
+        try:
+            return json.loads(closed)
+        except json.JSONDecodeError:
+            pass
 
-    return {
-        "type":  "tool_use",
-        "id":    f"toolu_{uuid.uuid4().hex[:16]}",
-        "name":  tool_name,
-        "input": params,
-    }
-
-
-def _native_call_has_narrative_preamble(tool_name: str, tag_name: str, full_text: str, match_start: int) -> bool:
-    if tool_name not in _HIGH_RISK_NATIVE_TOOLS:
-        return False
-    leading = full_text[:match_start].strip()
-    return len(leading) > _LEADING_PROSE_WARN_CHARS
-
-
-def strip_premature_exit_preambles(text: str) -> str:
-    preamble_patterns = [
-        r"^(?:Now\s+)?(?:let me|let's|I'll|I will)\s+(?:check|run|execute|look at|examine|read|write|edit|search|fetch)\s+[^\n]*?\n+(?=<tool_use>|<\w+>)",
-        r"^(?:I'm|I am)\s+(?:going to|about to)\s+(?:check|run|execute|look at|examine|read|write|edit|search|fetch)\s+[^\n]*?\n+(?=<tool_use>|<\w+>)",
-        r"^(?:First|Next),?\s+(?:let me|I'll|I will)\s+(?:check|run|execute|look at|examine|read|write|edit|search|fetch)\s+[^\n]*?\n+(?=<tool_use>|<\w+>)",
-    ]
-    for pattern in preamble_patterns:
-        text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.MULTILINE)
-    return text
+    print(f"[tool_parse] failed to parse JSON: {repr(cleaned[:120])}", flush=True)
+    return None
 
 
 def strip_fabricated_continuation(text: str) -> str:
@@ -800,49 +666,8 @@ def _append_text(blocks: list, text: str) -> None:
 
 
 def _find_first_tool_call_end(text: str) -> int:
-    candidates = []
     idx = text.find("</tool_use>")
-    if idx != -1:
-        candidates.append(idx + len("</tool_use>"))
-    for m in re.finditer(r"</(\w+)>", text):
-        tag = m.group(1)
-        if tag in CLAUDE_CODE_TOOL_NAMES or tag.lower() in DEEPSEEK_TAG_TO_TOOL:
-            candidates.append(m.end())
-    return min(candidates) if candidates else -1
-
-
-def _fix_missing_opening_tool_use_tag(text: str) -> str:
-    if "<tool_use>" in text:
-        return text
-    closes = list(re.finditer(r"</tool_use>", text))
-    if not closes:
-        return text
-    last_close = closes[-1]
-    head = text[:last_close.start()]
-    tail = text[last_close.end():]
-    search_from = closes[-2].end() if len(closes) > 1 else 0
-    brace_idx = head.find("{", search_from)
-    if brace_idx == -1:
-        return text
-    prose = head[:brace_idx]
-    json_candidate = head[brace_idx:].strip()
-    obj = _parse_json_tool(json_candidate)
-    if not isinstance(obj, dict) or "name" not in obj:
-        return text
-    return f"{prose}<tool_use>\n{json_candidate}\n</tool_use>{tail}"
-
-
-def _fix_dangling_unclosed_tool_use(text: str) -> str:
-    opens = [m.end() for m in re.finditer(r"<tool_use>", text)]
-    if not opens:
-        return text
-    last_open = opens[-1]
-    if "</tool_use>" in text[last_open:]:
-        return text
-    payload = text[last_open:].strip()
-    if not payload.startswith("{"):
-        return text
-    return text[:last_open] + payload + "</tool_use>"
+    return idx + len("</tool_use>") if idx != -1 else -1
 
 
 def parse_response(text: str, valid_tools=None) -> list:
@@ -850,26 +675,7 @@ def parse_response(text: str, valid_tools=None) -> list:
     last = 0
     last_tool_end = None
 
-    text = strip_premature_exit_preambles(text)
-
-    # Pre-pass 1: <tool_call name="X">...</tool_call>
-    tool_call_attr_pat = re.compile(
-        r"""<tool_call\s+name=["']?(\w+)["']?>\s*(.*?)\s*</tool_call>""", re.DOTALL)
-    def _replace_tool_call_attr(m):
-        tool_name = m.group(1).strip()
-        raw_inner = m.group(2).strip()
-        obj = _parse_json_tool(raw_inner) or {}
-        if isinstance(obj, dict) and "input" in obj and isinstance(obj["input"], dict):
-            params = obj["input"]
-        elif isinstance(obj, dict) and "name" in obj and set(obj.keys()) <= {"name", "id", "input", "type"}:
-            params = obj.get("input", {}) or {}
-        else:
-            params = obj if isinstance(obj, dict) else {}
-        merged = {"name": tool_name, "id": f"toolu_{uuid.uuid4().hex[:16]}", "input": params}
-        return f"<tool_use>{json.dumps(merged)}</tool_use>"
-    text = tool_call_attr_pat.sub(_replace_tool_call_attr, text)
-
-    # Pre-pass 2: DeepSeek-V3 special tokens
+    # Pre-pass: DeepSeek-V3 special tokens → <tool_use>
     special_token_pat = re.compile(
         r"<｜tool▁call▁begin｜>.*?<｜tool▁sep｜>\s*(\w+)\s*```(?:json)?\s*(.*?)```\s*<｜tool▁call▁end｜>",
         re.DOTALL)
@@ -885,12 +691,8 @@ def parse_response(text: str, valid_tools=None) -> list:
     text = special_token_pat.sub(_replace_special_tokens, text)
     text = re.sub(r"<｜tool▁calls▁begin｜>|<｜tool▁calls▁end｜>", "", text)
 
-    text = _fix_missing_opening_tool_use_tag(text)
-    text = _fix_dangling_unclosed_tool_use(text)
-
     # Strip hallucinated continuations
     fabrication_markers_always = ["\nHuman: <tool_result>", "\nHuman: <tool_use_error>"]
-    fabrication_markers_after_tool = ["\n\nHuman:", "\nHuman:", "\n\nAssistant:"]
     earliest = len(text)
     for marker in fabrication_markers_always:
         idx = text.find(marker)
@@ -898,64 +700,39 @@ def parse_response(text: str, valid_tools=None) -> list:
             earliest = idx
     first_tool_close = _find_first_tool_call_end(text)
     if first_tool_close != -1:
-        for marker in fabrication_markers_after_tool:
+        for marker in ["\n\nHuman:", "\nHuman:", "\n\nAssistant:"]:
             idx = text.find(marker, first_tool_close)
             if idx != -1 and idx < earliest:
                 earliest = idx
     if earliest < len(text):
         text = text[:earliest]
 
-    combined = re.compile(
-        r"<tool_use>(?P<json_inner>.*?)</tool_use>"
-        r"|<(?P<ntag>[A-Za-z]\w*)>(?P<ninner>.*?)</(?P=ntag)>",
-        re.DOTALL,
-    )
+    tool_use_pat = re.compile(r"<tool_use>(.*?)</tool_use>", re.DOTALL)
 
-    for m in combined.finditer(text):
+    for m in tool_use_pat.finditer(text):
         segment_start = m.start()
         segment_end   = m.end()
-        tag   = "tool_use" if m.group("json_inner") is not None else m.group("ntag")
-        inner = m.group("json_inner") if m.group("json_inner") is not None else m.group("ninner")
+        inner = m.group(1)
 
         if last_tool_end is None:
             _append_text(blocks, text[last:segment_start])
 
-        matched_text = text[segment_start:segment_end]
-
-        if tag == "tool_use":
-            obj = _parse_json_tool(inner.strip())
-            if obj and isinstance(obj, dict) and "name" in obj:
-                tool_name = obj.get("name", "")
-                tool_input = obj.get("input", {})
-                if valid_tools and tool_name not in valid_tools:
-                    _append_text(blocks, matched_text)
-                else:
-                    blocks.append({
-                        "type":  "tool_use",
-                        "id":    f"toolu_{uuid.uuid4().hex[:16]}",
-                        "name":  tool_name,
-                        "input": tool_input if isinstance(tool_input, dict) else {},
-                    })
-                    last_tool_end = segment_end
+        obj = _parse_json_tool(inner.strip())
+        if obj and isinstance(obj, dict) and "name" in obj:
+            tool_name  = obj.get("name", "")
+            tool_input = obj.get("input", {})
+            if valid_tools and tool_name not in valid_tools:
+                _append_text(blocks, m.group(0))
             else:
-                _append_text(blocks, matched_text)
+                blocks.append({
+                    "type":  "tool_use",
+                    "id":    f"toolu_{uuid.uuid4().hex[:16]}",
+                    "name":  tool_name,
+                    "input": tool_input if isinstance(tool_input, dict) else {},
+                })
+                last_tool_end = segment_end
         else:
-            tag_name = tag
-            if tag_name.lower() in _SKIP_TAGS:
-                if last_tool_end is None:
-                    _append_text(blocks, matched_text)
-            else:
-                block = parse_native_tag(tag_name, inner, valid_tools=valid_tools)
-                if block is not None and _native_call_has_narrative_preamble(
-                        block["name"], tag_name, text, segment_start):
-                    if last_tool_end is None:
-                        _append_text(blocks, matched_text)
-                elif block is not None:
-                    blocks.append(block)
-                    last_tool_end = segment_end
-                else:
-                    if last_tool_end is None:
-                        _append_text(blocks, matched_text)
+            _append_text(blocks, m.group(0))
 
         last = segment_end
 
@@ -971,52 +748,9 @@ def parse_response(text: str, valid_tools=None) -> list:
     if not blocks:
         blocks.append({"type": "text", "text": text})
 
-    if not any(b["type"] == "tool_use" for b in blocks):
-        fence_pat = re.compile(r"```json\s*(\{[^`]*?\})\s*```", re.DOTALL)
-        rebuilt: list[dict] = []
-        replaced = False
-        full_text_so_far = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-        last_pos = 0
-        for fm in fence_pat.finditer(full_text_so_far):
-            obj = _parse_json_tool(fm.group(1))
-            if obj and isinstance(obj, dict) and "name" in obj and "input" in obj:
-                tool_name = obj.get("name", "")
-                if not valid_tools or tool_name in valid_tools:
-                    before = full_text_so_far[last_pos:fm.start()]
-                    if before.strip():
-                        rebuilt.append({"type": "text", "text": before})
-                    rebuilt.append({
-                        "type":  "tool_use",
-                        "id":    f"toolu_{uuid.uuid4().hex[:16]}",
-                        "name":  tool_name,
-                        "input": obj.get("input", {}),
-                    })
-                    last_pos = fm.end()
-                    replaced = True
-        if replaced:
-            tail2 = full_text_so_far[last_pos:]
-            if tail2.strip():
-                rebuilt.append({"type": "text", "text": tail2})
-            blocks = rebuilt
-
     return blocks
 
 # ── ToolFilter ────────────────────────────────────────────────────────────────
-
-def _find_unknown_tools(raw_text: str, valid_tools: set) -> set:
-    unknown: set[str] = set()
-    pattern = re.compile(
-        r"<(?:tool_use|tool_call)(?:\s[^>]*)?\s*>\s*(.*?)\s*</(?:tool_use|tool_call)>",
-        re.DOTALL,
-    )
-    for m in pattern.finditer(raw_text):
-        obj = _parse_json_tool(m.group(1).strip())
-        if obj and isinstance(obj, dict):
-            name = obj.get("name", "")
-            if name and name not in valid_tools:
-                unknown.add(name)
-    return unknown
-
 
 _TOOL_USE_PREFILL = '<tool_use>\n{"name": "'
 
@@ -1033,16 +767,19 @@ class ToolFilter:
         MAX_UNKNOWN_TOOL_RETRIES = 2
         unknown_tool_attempts = 0
         current_prompt = prompt
-        pending_prefill = ""
 
         while True:
             raw_text, _ = call_deepseek_managed(session_key, current_prompt)
-            if pending_prefill:
-                raw_text = pending_prefill + raw_text
-                pending_prefill = ""
+            blocks = parse_response(raw_text, valid_tools=self._valid_tools or None)
 
-            blocks = parse_response(raw_text, valid_tools=self._valid_tools)
-            unknown = _find_unknown_tools(raw_text, self._valid_tools)
+            # Check for tool names the model hallucinated that aren't in our schema
+            unknown: set[str] = set()
+            for b in blocks:
+                if b["type"] == "tool_use":
+                    name = b.get("name", "")
+                    if self._valid_tools and name not in self._valid_tools:
+                        unknown.add(name)
+
             if unknown:
                 if unknown_tool_attempts >= MAX_UNKNOWN_TOOL_RETRIES:
                     return raw_text, blocks
@@ -1051,11 +788,10 @@ class ToolFilter:
                 correction = (
                     f"\n\nHuman: <tool_use_error>\n"
                     f"ERROR: You tried to call unknown tool(s): {', '.join(sorted(unknown))}.\n"
-                    f"Only use tools from this list: {valid_list}\n"
+                    f"Only use acurist tools from this list: {valid_list}\n"
                     f"</tool_use_error>\n\nAssistant: {_TOOL_USE_PREFILL}"
                 )
                 current_prompt = current_prompt + correction
-                pending_prefill = _TOOL_USE_PREFILL
                 continue
 
             return raw_text, blocks
@@ -1345,12 +1081,12 @@ def _allow_response(stream: bool, model: str):
 
 @app.route("/v1/messages", methods=["POST"])
 def messages():
-    body    = request.get_json(force=True)
-    msgs    = body.get("messages", [])
-    model   = body.get("model", "claude-sonnet-4-20250514")
-    stream  = body.get("stream", False)
-    system  = body.get("system", "")
-    tools   = body.get("tools", [])
+    body   = request.get_json(force=True)
+    msgs   = body.get("messages", [])
+    model  = body.get("model", "claude-sonnet-4-6")
+    stream = body.get("stream", False)
+    system = body.get("system", "")
+    tools  = body.get("tools", [])
 
     if isinstance(system, list):
         system = "\n".join(
@@ -1365,7 +1101,7 @@ def messages():
     input_tokens = max(1, len(prompt.split()))
     session_key  = derive_session_key(system, msgs)
     store.get_or_create(session_key)
-    tf           = ToolFilter(tools, msgs)
+    tf = ToolFilter(tools, msgs)
 
     if stream:
         def generate():
@@ -1382,8 +1118,8 @@ def messages():
     lock = enforce_request_pacing(session_key)
     try:
         full_text, blocks = tf.call_with_filter(session_key, prompt)
-        output_toks  = max(1, len(full_text.split()))
-        stop_reason  = "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
+        output_toks = max(1, len(full_text.split()))
+        stop_reason = "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
     except Exception as e:
         return jsonify({"type": "error", "error": {"type": "api_error", "message": str(e)}}), 500
     finally:
@@ -1421,8 +1157,8 @@ def count_tokens():
 def list_models():
     return jsonify({
         "data": [
-            {"id": "claude-opus-4-5",          "object": "model"},
-            {"id": "claude-sonnet-4-20250514",  "object": "model"},
+            {"id": "claude-sonnet-4-6",        "object": "model"},
+            {"id": "claude-opus-4-6",           "object": "model"},
             {"id": "claude-haiku-4-5-20251001", "object": "model"},
         ],
         "object": "list",
@@ -1431,10 +1167,9 @@ def list_models():
 
 @app.route("/health", methods=["GET"])
 def health():
-    wasm_path = get_wasm_path() if hasher is None else "loaded"
     return jsonify({
         "status": "ok",
-        "wasm":   str(wasm_path),
+        "wasm":   "loaded" if hasher else "not loaded",
         "tokens": len(_token_pool),
     })
 
@@ -1459,8 +1194,6 @@ def main():
     hasher = DeepSeekHash(wasm_path)
     print("OK")
 
-    # Clear all past DeepSeek conversations at startup so the AI starts
-    # with a clean slate and does not hallucinate from stale history.
     print("Clearing past DeepSeek conversations...", end=" ", flush=True)
     _startup_cookies = parse_cookies(COOKIE_STR) if COOKIE_STR else {}
     _startup_http = make_http_session(_token_pool.current(), _startup_cookies)
@@ -1474,14 +1207,15 @@ def main():
         f"(rotation {'enabled' if len(_token_pool) > 1 else 'disabled — add more tokens to enable'})"
     )
 
-    print(f"\ndeeptunnel listening on http://0.0.0.0:{PORT}")
+    print(f"\ndeeptunnel [acurist edition] listening on http://0.0.0.0:{PORT}")
     print(f"  model   : {model_label}")
     print(f"  search  : {search_label}")
     print(f"  thinking: {think_label}")
     print(f"  tokens  : {token_label}")
     print(f"\nIn your shell:")
-    print(f'  export ANTHROPIC_BASE_URL="http://localhost:{PORT}"')
-    print(f'  export ANTHROPIC_API_KEY="local-proxy-key"')
+    print(f'  export ACURIST_PROXY="http://localhost:{PORT}"')
+    print(f'  export ACURIST_MODEL="deepseek-chat"')
+    print(f'  acurist')
     print()
 
     app.run(host="0.0.0.0", port=PORT, threaded=True)
