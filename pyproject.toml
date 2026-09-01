@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deeptunnel"
-version = "0.1.2"
+version = "0.1.3"
 description = "DeepSeek → Anthropic API proxy — run DeepSeek behind the Anthropic SDK / Claude Code/acurist"
 readme = "README.md"
 license = { text = "MIT" }
